@@ -14,12 +14,17 @@ export default function EditorPaperDetail() {
   const [loading, setLoading] = useState(true);
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [availableReviewers, setAvailableReviewers] = useState<any[]>([]);
+  const [paperFields, setPaperFields] = useState<any[]>([]);
   const [selectedReviewers, setSelectedReviewers] = useState<string[]>([]);
+  const [requiredReviews, setRequiredReviews] = useState(3);
   const [dueDays, setDueDays] = useState(14);
   const [showDecisionModal, setShowDecisionModal] = useState(false);
   const [decision, setDecision] = useState('');
   const [decisionComments, setDecisionComments] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [showScreeningModal, setShowScreeningModal] = useState(false);
+  const [screeningAction, setScreeningAction] = useState<'request_revision' | 'mark_unsuitable' | null>(null);
+  const [screeningComments, setScreeningComments] = useState('');
 
   useEffect(() => {
     loadPaper();
@@ -41,7 +46,9 @@ export default function EditorPaperDetail() {
     try {
       const res = await api.get(`/reviews/paper/${id}/available-reviewers`);
       setAvailableReviewers(res.data.reviewers);
+      setPaperFields(res.data.paper_fields || []);
       setSelectedReviewers([]);
+      setRequiredReviews(3);
     } catch (err) {
       console.error('加载可用审稿人失败', err);
     }
@@ -52,12 +59,17 @@ export default function EditorPaperDetail() {
       alert('请至少选择一位审稿人');
       return;
     }
+    if (selectedReviewers.length < requiredReviews) {
+      alert(`需要至少选择 ${requiredReviews} 位审稿人以保证有 ${requiredReviews} 份有效意见`);
+      return;
+    }
 
     setSubmitting(true);
     try {
       await api.post(`/reviews/paper/${id}/assign`, {
         reviewerIds: selectedReviewers,
         due_days: dueDays,
+        required_reviews: requiredReviews,
       });
       setShowAssignModal(false);
       loadPaper();
@@ -126,6 +138,41 @@ export default function EditorPaperDetail() {
     return <div className="text-center py-10 text-gray-500">稿件不存在</div>;
   }
 
+  const handleScreening = async () => {
+    if (!screeningAction) return;
+
+    setSubmitting(true);
+    try {
+      const endpoint = screeningAction === 'request_revision'
+        ? `/papers/${id}/screening/request-revision`
+        : `/papers/${id}/screening/mark-unsuitable`;
+
+      await api.post(endpoint, {
+        comments: screeningComments,
+      });
+      setShowScreeningModal(false);
+      setScreeningAction(null);
+      setScreeningComments('');
+      loadPaper();
+      alert('操作成功');
+    } catch (err: any) {
+      alert(err.response?.data?.error || '操作失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSendToReview = async () => {
+    try {
+      await api.post(`/papers/${id}/screening/send-to-review`);
+      loadAvailableReviewers();
+      setShowAssignModal(true);
+    } catch (err: any) {
+      alert(err.response?.data?.error || '操作失败');
+    }
+  };
+
+  const canScreen = paper.status === 'submitted' || paper.status === 'revision_submitted';
   const canAssign = paper.status === 'submitted' || paper.status === 'revision_submitted';
   const canMakeDecision = paper.reviews?.filter((r: any) => r.status === 'completed').length > 0;
   const completedCount = paper.reviews?.filter((r: any) => r.status === 'completed').length || 0;
@@ -143,8 +190,41 @@ export default function EditorPaperDetail() {
         <div className="flex-1">
           <h2 className="text-xl font-semibold text-gray-800">稿件详情</h2>
         </div>
-        <div className="flex items-center gap-2">
-          {canAssign && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {canScreen && (
+            <>
+              <button
+                onClick={() => {
+                  setScreeningAction('request_revision');
+                  setScreeningComments('');
+                  setShowScreeningModal(true);
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg"
+              >
+                <XCircle size={18} />
+                退回补资料
+              </button>
+              <button
+                onClick={() => {
+                  setScreeningAction('mark_unsuitable');
+                  setScreeningComments('');
+                  setShowScreeningModal(true);
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg"
+              >
+                <XCircle size={18} />
+                不适合送审
+              </button>
+              <button
+                onClick={handleSendToReview}
+                className="flex items-center gap-2 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg"
+              >
+                <UserPlus size={18} />
+                送审并分配
+              </button>
+            </>
+          )}
+          {!canScreen && canAssign && (
             <button
               onClick={() => {
                 loadAvailableReviewers();
@@ -204,6 +284,22 @@ export default function EditorPaperDetail() {
                 ))}
               </div>
             </div>
+
+            {paper.fields && paper.fields.length > 0 && (
+              <div className="mb-6">
+                <h3 className="font-semibold text-gray-800 mb-2">研究领域</h3>
+                <div className="flex flex-wrap gap-2">
+                  {paper.fields.map((field: any, i: number) => (
+                    <span
+                      key={i}
+                      className="px-3 py-1 bg-primary-50 text-primary-700 rounded-full text-sm"
+                    >
+                      {field.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div>
               <h3 className="font-semibold text-gray-800 mb-3">作者列表</h3>
@@ -274,6 +370,10 @@ export default function EditorPaperDetail() {
                 <span className="font-medium text-gray-800">{acceptedCount} 人</span>
               </div>
               <div className="flex justify-between text-sm">
+                <span className="text-gray-500">需要审稿数</span>
+                <span className="font-medium text-primary-600">{paper.required_reviews || 3} 份意见</span>
+              </div>
+              <div className="flex justify-between text-sm">
                 <span className="text-gray-500">总审稿人</span>
                 <span className="font-medium text-gray-800">
                   {paper.reviews?.length || 0} 人
@@ -285,10 +385,17 @@ export default function EditorPaperDetail() {
               <div
                 className="h-full bg-green-500 rounded-full transition-all"
                 style={{
-                  width: `${paper.reviews?.length ? (completedCount / paper.reviews.length) * 100 : 0}%`
+                  width: `${paper.reviews?.length ? (completedCount / (paper.required_reviews || 3)) * 100 : 0}%`,
+                  maxWidth: '100%'
                 }}
               />
             </div>
+            {completedCount >= (paper.required_reviews || 3) && (
+              <p className="text-xs text-green-600 mt-2 flex items-center gap-1">
+                <CheckCircle size={12} />
+                已收集足够意见，可以做出决定
+              </p>
+            )}
           </div>
 
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -417,20 +524,47 @@ export default function EditorPaperDetail() {
               <p className="text-sm text-gray-500 mt-1">
                 选择审稿人，系统将按顺序邀请，第一位拒绝后自动邀请下一位
               </p>
+              {paperFields.length > 0 && (
+                <div className="mt-3 p-3 bg-blue-50 rounded-lg">
+                  <p className="text-sm font-medium text-blue-800 mb-2">论文研究领域：</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {paperFields.map((f: any, i: number) => (
+                      <span key={i} className="px-2.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full">
+                        {f.name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             
-            <div className="p-4 border-b border-gray-200 flex items-center gap-4">
-              <label className="text-sm text-gray-600">审稿期限：</label>
-              <select
-                value={dueDays}
-                onChange={e => setDueDays(Number(e.target.value))}
-                className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
-              >
-                <option value={7}>7 天</option>
-                <option value={14}>14 天</option>
-                <option value={21}>21 天</option>
-                <option value={30}>30 天</option>
-              </select>
+            <div className="p-4 border-b border-gray-200 flex flex-wrap gap-4">
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-gray-600 whitespace-nowrap">需要审稿数：</label>
+                <select
+                  value={requiredReviews}
+                  onChange={e => setRequiredReviews(Number(e.target.value))}
+                  className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+                >
+                  <option value={2}>2 份意见</option>
+                  <option value={3}>3 份意见</option>
+                  <option value={4}>4 份意见</option>
+                  <option value={5}>5 份意见</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-gray-600 whitespace-nowrap">审稿期限：</label>
+                <select
+                  value={dueDays}
+                  onChange={e => setDueDays(Number(e.target.value))}
+                  className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+                >
+                  <option value={7}>7 天</option>
+                  <option value={14}>14 天</option>
+                  <option value={21}>21 天</option>
+                  <option value={30}>30 天</option>
+                </select>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto p-4">
@@ -459,11 +593,25 @@ export default function EditorPaperDetail() {
                           </div>
                         </div>
                         {reviewer.match_count > 0 && (
-                          <span className="text-xs text-green-600 bg-green-50 px-2 py-1 rounded">
-                            匹配度: {reviewer.match_count}
-                          </span>
+                          <div className="text-right">
+                            <span className="text-xs text-green-600 bg-green-50 px-2 py-1 rounded">
+                              匹配度: {reviewer.match_count}
+                            </span>
+                          </div>
                         )}
                       </div>
+                      {reviewer.matched_fields && reviewer.matched_fields.length > 0 && (
+                        <div className="mt-2 p-2 bg-green-50 rounded">
+                          <p className="text-xs text-green-700 mb-1">匹配原因：</p>
+                          <div className="flex flex-wrap gap-1">
+                            {reviewer.matched_fields.map((f: string, i: number) => (
+                              <span key={i} className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded">
+                                {f}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       {reviewer.fields && reviewer.fields.length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-2">
                           {reviewer.fields.slice(0, 3).map((f: string, i: number) => (
@@ -486,7 +634,13 @@ export default function EditorPaperDetail() {
 
             <div className="p-6 border-t border-gray-200 flex justify-between">
               <div className="text-sm text-gray-500">
-                已选择 {selectedReviewers.length} 位审稿人
+                需要 {requiredReviews} 份意见 · 已选择 {selectedReviewers.length} 位审稿人
+                {selectedReviewers.length > 0 && selectedReviewers.length < requiredReviews && (
+                  <span className="text-yellow-600 ml-2">（还需 {requiredReviews - selectedReviewers.length} 位）</span>
+                )}
+                {selectedReviewers.length >= requiredReviews && (
+                  <span className="text-green-600 ml-2">✓ 人数充足</span>
+                )}
               </div>
               <div className="flex gap-3">
                 <button
@@ -497,7 +651,7 @@ export default function EditorPaperDetail() {
                 </button>
                 <button
                   onClick={handleAssignReviewers}
-                  disabled={selectedReviewers.length === 0 || submitting}
+                  disabled={selectedReviewers.length === 0 || selectedReviewers.length < requiredReviews || submitting}
                   className="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg disabled:opacity-50"
                 >
                   {submitting ? '分配中...' : '确认分配'}
@@ -510,15 +664,97 @@ export default function EditorPaperDetail() {
 
       {showDecisionModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl w-full max-w-lg">
+          <div className="bg-white rounded-xl w-full max-w-3xl max-h-[90vh] flex flex-col">
             <div className="p-6 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-800">做出最终决定</h3>
+              <p className="text-sm text-gray-500 mt-1">
+                请查看汇总的审稿意见后做出决定
+              </p>
             </div>
             
-            <div className="p-6 space-y-4">
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* 意见汇总 */}
+              {paper.reviews?.filter((r: any) => r.status === 'completed').length > 0 && (
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <h4 className="font-medium text-gray-800 mb-3 flex items-center gap-2">
+                    <CheckCircle size={16} className="text-green-600" />
+                    审稿意见汇总
+                  </h4>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {(['accept', 'minor_revision', 'major_revision', 'reject'] as const).map(rec => {
+                      const count = paper.reviews.filter((r: any) => r.status === 'completed' && r.recommendation === rec).length;
+                      return count > 0 ? (
+                        <div key={rec} className={`p-3 rounded-lg text-center ${
+                          rec === 'accept' ? 'bg-green-100 text-green-800' :
+                          rec === 'minor_revision' ? 'bg-blue-100 text-blue-800' :
+                          rec === 'major_revision' ? 'bg-yellow-100 text-yellow-800' :
+                          'bg-red-100 text-red-800'
+                        }`}>
+                          <p className="text-2xl font-bold">{count}</p>
+                          <p className="text-xs mt-1">{recommendationLabels[rec]}</p>
+                        </div>
+                      ) : null;
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* 各位审稿人意见 */}
+              <div>
+                <h4 className="font-medium text-gray-800 mb-3 flex items-center gap-2">
+                  <MessageSquare size={16} className="text-primary-600" />
+                  各位审稿人意见
+                </h4>
+                <div className="space-y-3">
+                  {paper.reviews?.filter((r: any) => r.status === 'completed').map((review: any, idx: number) => (
+                    <div key={review.id} className="border border-gray-200 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-800">
+                            审稿人 {idx + 1}
+                          </span>
+                          {review.recommendation && (
+                            <span className={`text-xs px-2 py-0.5 rounded ${
+                              review.recommendation === 'accept' ? 'bg-green-100 text-green-700' :
+                              review.recommendation === 'reject' ? 'bg-red-100 text-red-700' :
+                              review.recommendation === 'minor_revision' ? 'bg-blue-100 text-blue-700' :
+                              'bg-yellow-100 text-yellow-700'
+                            }`}>
+                              {recommendationLabels[review.recommendation]}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs text-gray-500">
+                          完成时间：{formatDate(review.completed_date)}
+                        </span>
+                      </div>
+
+                      {review.comments_to_author && (
+                        <div className="mt-2">
+                          <p className="text-xs font-medium text-gray-600 mb-1">给作者的意见：</p>
+                          <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded whitespace-pre-wrap">
+                            {review.comments_to_author}
+                          </p>
+                        </div>
+                      )}
+
+                      {review.comments_to_editor && (
+                        <div className="mt-2">
+                          <p className="text-xs font-medium text-orange-600 mb-1">给编辑的私密意见：</p>
+                          <p className="text-sm text-orange-700 bg-orange-50 p-3 rounded whitespace-pre-wrap">
+                            {review.comments_to_editor}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* 决定选择 */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-3">
-                  决定 <span className="text-red-500">*</span>
+                  最终决定 <span className="text-red-500">*</span>
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   {[
@@ -570,14 +806,18 @@ export default function EditorPaperDetail() {
                   onChange={e => setDecisionComments(e.target.value)}
                   rows={5}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none"
-                  placeholder="请输入决定的详细说明..."
+                  placeholder="请输入决定的详细说明，作者将看到此意见..."
                 />
               </div>
             </div>
 
             <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
               <button
-                onClick={() => setShowDecisionModal(false)}
+                onClick={() => {
+                  setShowDecisionModal(false);
+                  setDecision('');
+                  setDecisionComments('');
+                }}
                 className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
               >
                 取消
@@ -587,7 +827,65 @@ export default function EditorPaperDetail() {
                 disabled={!decision || submitting}
                 className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-50"
               >
-                {submitting ? '提交中...' : '确认发布'}
+                {submitting ? '发布中...' : '确认发布决定'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showScreeningModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl w-full max-w-lg">
+            <div className="p-6 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-800">
+                {screeningAction === 'request_revision' ? '退回补资料' : '标记不适合送审'}
+              </h3>
+              <p className="text-sm text-gray-500 mt-1">
+                {screeningAction === 'request_revision'
+                  ? '请输入需要作者补充的资料说明'
+                  : '请输入不适合送审的原因说明'}
+              </p>
+            </div>
+            
+            <div className="p-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  说明 <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  value={screeningComments}
+                  onChange={e => setScreeningComments(e.target.value)}
+                  rows={5}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none"
+                  placeholder={screeningAction === 'request_revision'
+                    ? '请详细说明需要作者补充哪些资料...'
+                    : '请详细说明不适合送审的原因...'}
+                />
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowScreeningModal(false);
+                  setScreeningAction(null);
+                  setScreeningComments('');
+                }}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleScreening}
+                disabled={!screeningComments.trim() || submitting}
+                className={`px-4 py-2 text-white rounded-lg disabled:opacity-50 ${
+                  screeningAction === 'request_revision'
+                    ? 'bg-yellow-600 hover:bg-yellow-700'
+                    : 'bg-red-600 hover:bg-red-700'
+                }`}
+              >
+                {submitting ? '提交中...' : '确认提交'}
               </button>
             </div>
           </div>

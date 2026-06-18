@@ -168,7 +168,8 @@ async function initDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       decision TEXT,
       decision_date DATETIME,
-      editor_id TEXT
+      editor_id TEXT,
+      required_reviews INTEGER DEFAULT 3
     );
 
     CREATE TABLE IF NOT EXISTS paper_authors (
@@ -361,6 +362,13 @@ async function initDatabase() {
       INSERT INTO users (id, email, password, name, role, affiliation, bio)
       VALUES (?, ?, ?, ?, 'author', '浙江大学', '博士研究生')
     `).run(author1Id, 'author1@journal.com', bcrypt.hashSync('author123', 10), '陈同学');
+  }
+
+  // 数据库迁移：添加 required_reviews 字段（如果不存在）
+  try {
+    db.prepare(`ALTER TABLE papers ADD COLUMN required_reviews INTEGER DEFAULT 3`).run();
+  } catch (e) {
+    // 字段已存在，忽略错误
   }
 
   saveDatabase();

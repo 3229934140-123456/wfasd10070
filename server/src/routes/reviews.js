@@ -23,6 +23,23 @@ function getNextBackupReviewer(paperId) {
 }
 
 function inviteNextReviewer(paperId) {
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(paperId);
+  if (!paper) return null;
+
+  const requiredReviews = paper.required_reviews || 3;
+  const currentValid = db.prepare(`
+    SELECT COUNT(*) as count FROM reviews 
+    WHERE paper_id = ? AND status IN ('completed', 'accepted')
+  `).get(paperId).count;
+
+  if (currentValid >= requiredReviews) {
+    console.log(`[inviteNextReviewer] 已达到所需审稿数 ${currentValid}/${requiredReviews}，不再邀请下一位`);
+    return null;
+  }
+
+  const remainingNeeded = requiredReviews - currentValid;
+  console.log(`[inviteNextReviewer] 已有 ${currentValid}/${requiredReviews} 份有效意见，还需 ${remainingNeeded} 份`);
+
   const next = getNextBackupReviewer(paperId);
   if (!next) return null;
 
@@ -231,11 +248,28 @@ router.post('/:id/submit', authMiddleware, requireRole('reviewer'), (req, res) =
   `).get(review.paper_id).count;
 
   addNotification(paper.corresponding_author_id, 'review_completed', '审稿意见已提交',
-    `一位审稿人已完成审稿（第 ${completedCount} 位审稿人完成`, review.paper_id);
+    `一位审稿人已完成审稿（第 ${completedCount} 位审稿人完成）`, review.paper_id);
 
   if (paper.editor_id) {
     addNotification(paper.editor_id, 'review_completed', '审稿意见已提交',
       `论文"${paper.title}"的一位审稿人已完成审稿`, review.paper_id);
+  }
+
+  // 检查是否还需要邀请更多审稿人以达到 required_reviews
+  const requiredReviews = paper.required_reviews || 3;
+  const acceptedCount = db.prepare(`
+    SELECT COUNT(*) as count FROM reviews WHERE paper_id = ? AND status = 'accepted'
+  `).get(review.paper_id).count;
+  const totalActive = completedCount + acceptedCount;
+  
+  if (totalActive < requiredReviews) {
+    console.log(`[review/submit] 当前有效意见 ${totalActive}/${requiredReviews}，尝试邀请下一位`);
+    const nextInvited = inviteNextReviewer(review.paper_id);
+    if (nextInvited) {
+      console.log(`[review/submit] 已自动邀请下一位审稿人补足意见数量`);
+    }
+  } else {
+    console.log(`[review/submit] 已达到所需意见数 ${totalActive}/${requiredReviews}，停止邀请`);
   }
 
   const updatedReview = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
@@ -277,12 +311,16 @@ router.get('/paper/:paperId/available-reviewers', authMiddleware, requireRole('e
   const { paperId } = req.params;
 
   const paperFields = db.prepare(`
-    SELECT field_id FROM paper_fields WHERE paper_id = ?
-  `).all(paperId).map(f => f.field_id);
+    SELECT f.id, f.name FROM paper_fields pf
+    JOIN fields f ON pf.field_id = f.id
+    WHERE pf.paper_id = ?
+    ORDER BY f.category, f.name
+  `).all(paperId);
+  const paperFieldIds = paperFields.map(f => f.id);
 
   let reviewers;
-  if (paperFields.length > 0) {
-    const placeholders = paperFields.map(() => '?').join(',');
+  if (paperFieldIds.length > 0) {
+    const placeholders = paperFieldIds.map(() => '?').join(',');
     reviewers = db.prepare(`
       SELECT u.id, u.name, u.email, u.affiliation,
              (SELECT COUNT(*) FROM reviewer_fields rf WHERE rf.reviewer_id = u.id AND rf.field_id IN (${placeholders})) as match_count
@@ -293,7 +331,7 @@ router.get('/paper/:paperId/available-reviewers', authMiddleware, requireRole('e
       AND u.id NOT IN (
         SELECT reviewer_id FROM review_backups WHERE paper_id = ? AND status != 'declined')
       ORDER BY match_count DESC
-    `).all(...paperFields, paperId, paperId);
+    `).all(...paperFieldIds, paperId, paperId);
   } else {
     reviewers = db.prepare(`
       SELECT u.id, u.name, u.email, u.affiliation, 0 as match_count
@@ -307,20 +345,27 @@ router.get('/paper/:paperId/available-reviewers', authMiddleware, requireRole('e
   }
 
   reviewers.forEach(reviewer => {
-    const fields = db.prepare(`
+    const allFields = db.prepare(`
       SELECT f.name FROM fields f
       JOIN reviewer_fields rf ON f.id = rf.field_id
       WHERE rf.reviewer_id = ?
     `).all(reviewer.id).map(f => f.name);
-    reviewer.fields = fields;
+    reviewer.fields = allFields;
+
+    const matchedFields = db.prepare(`
+      SELECT f.name FROM fields f
+      JOIN reviewer_fields rf ON f.id = rf.field_id
+      WHERE rf.reviewer_id = ? AND rf.field_id IN (${paperFieldIds.map(() => '?').join(',') || '0'})
+    `).all(reviewer.id, ...paperFieldIds).map(f => f.name);
+    reviewer.matched_fields = matchedFields;
   });
 
-  res.json({ reviewers });
+  res.json({ reviewers, paper_fields: paperFields });
 });
 
 router.post('/paper/:paperId/assign', authMiddleware, requireRole('editor'), (req, res) => {
   const { paperId } = req.params;
-  const { reviewerIds, due_days = 14 } = req.body;
+  const { reviewerIds, due_days = 14, required_reviews = 3 } = req.body;
 
   if (!Array.isArray(reviewerIds) || reviewerIds.length === 0) {
     return res.status(400).json({ error: '请选择至少一位审稿人' });
@@ -355,9 +400,9 @@ router.post('/paper/:paperId/assign', authMiddleware, requireRole('editor'), (re
 
     db.prepare(`
       UPDATE papers 
-      SET status = 'under_review', editor_id = ?, updated_at = CURRENT_TIMESTAMP
+      SET status = 'under_review', editor_id = ?, required_reviews = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(req.user.id, paperId);
+    `).run(req.user.id, required_reviews, paperId);
 
     addNotification(firstReviewer, 'review_invite', '审稿邀请',
       `您被邀请为论文"${paper.title}"审稿`, paperId);
@@ -449,8 +494,19 @@ router.post('/paper/:paperId/decision', authMiddleware, requireRole('editor'), (
       WHERE id = ?
     `).run(paperStatus, decision, paperId);
 
-    addNotification(paper.corresponding_author_id, 'paper_decision', '论文审稿结果通知',
-      `您的论文"${paper.title}"已做出决定：${decision}`, paperId);
+    const decisionLabels = {
+      accept: '已录用',
+      minor_revision: '需要小修',
+      major_revision: '需要大修',
+      reject: '已拒绝',
+    };
+    const decisionLabel = decisionLabels[decision] || decision;
+    const commentPreview = comments && comments.length > 50 ? comments.substring(0, 50) + '...' : (comments || '');
+    
+    addNotification(paper.corresponding_author_id, 'paper_decision', 
+      `论文"${paper.title}" ${decisionLabel}`,
+      commentPreview || `您的论文已做出最终决定：${decisionLabel}`, 
+      paperId);
   });
 
   res.json({ success: true, message: '决定已发布' });

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
 import { formatDate, statusLabels } from '../utils/format';
-import { Plus, Search, Filter } from 'lucide-react';
+import { Plus, Search, Filter, Users } from 'lucide-react';
 
 export default function Papers() {
   const [papers, setPapers] = useState<any[]>([]);
@@ -96,16 +96,39 @@ export default function Papers() {
                     <h3 className="font-medium text-gray-800 hover:text-primary-600">
                       {paper.title}
                     </h3>
-                    <div className="flex items-center gap-4 mt-2">
+                    <div className="flex items-center gap-4 mt-2 flex-wrap">
                       <span className={`status-badge status-${paper.status}`}>
                         {statusLabels[paper.status] || paper.status}
                       </span>
-                      {paper.keywords && paper.keywords.length > 0 && (
-                        <span className="text-xs text-gray-500">
-                          关键词: {paper.keywords.slice(0, 3).join(', ')}
-                        </span>
-                      )}
                     </div>
+                    {paper.authors && paper.authors.length > 0 && (
+                      <div className="flex items-center gap-1.5 mt-2 text-xs text-gray-600">
+                        <Users size={12} className="text-gray-400" />
+                        <span>
+                          {paper.authors.map((a: any) => 
+                            a.is_corresponding ? `${a.name}*` : a.name
+                          ).join(', ')}
+                        </span>
+                      </div>
+                    )}
+                    {paper.keywords && paper.keywords.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {paper.keywords.slice(0, 4).map((kw: string, i: number) => (
+                          <span key={i} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                            {kw}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {paper.fields && paper.fields.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {paper.fields.slice(0, 3).map((f: any, i: number) => (
+                          <span key={i} className="text-xs bg-primary-50 text-primary-700 px-2 py-0.5 rounded">
+                            {f.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="text-right">
                     <p className="text-xs text-gray-500">投稿时间</p>

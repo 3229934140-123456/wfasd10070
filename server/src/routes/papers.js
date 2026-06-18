@@ -385,7 +385,11 @@ router.put('/:id', authMiddleware, requireRole('author'), upload.single('file'),
       UPDATE papers 
       SET title = ?, abstract = ?, file_path = ?, file_name = ?, 
           current_version = ?, updated_at = CURRENT_TIMESTAMP,
-          status = CASE WHEN status = 'revise' THEN 'revision_submitted' ELSE status END
+          status = CASE 
+            WHEN status = 'revise' THEN 'revision_submitted' 
+            WHEN status = 'needs_revision' THEN 'submitted'
+            ELSE status 
+          END
       WHERE id = ?
     `).run(title, abstract, filePath, fileName, newVersion, id);
 
@@ -485,6 +489,100 @@ router.get('/:id/authors', authMiddleware, (req, res) => {
   `).all(id);
 
   res.json({ authors });
+});
+
+router.post('/:id/screening/request-revision', authMiddleware, requireRole('editor'), (req, res) => {
+  const { id } = req.params;
+  const { comments } = req.body;
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
+  if (!paper) {
+    return res.status(404).json({ error: '论文不存在' });
+  }
+  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted') {
+    return res.status(400).json({ error: '当前状态不允许退回补资料' });
+  }
+
+  db.prepare(`
+    UPDATE papers 
+    SET status = 'needs_revision', 
+        editor_id = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(req.user.id, id);
+
+  if (comments) {
+    db.prepare(`
+      INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version)
+      VALUES (?, ?, 'request_revision', ?, ?)
+    `).run(id, req.user.id, comments, paper.current_version);
+  }
+
+  addNotification(paper.corresponding_author_id, 'editor_decision', '退回补资料通知',
+    `您的论文"${paper.title}"需要补充资料，请登录查看编辑意见`, id);
+
+  const updatedPaper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
+  res.json({ success: true, paper: updatedPaper });
+});
+
+router.post('/:id/screening/mark-unsuitable', authMiddleware, requireRole('editor'), (req, res) => {
+  const { id } = req.params;
+  const { comments } = req.body;
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
+  if (!paper) {
+    return res.status(404).json({ error: '论文不存在' });
+  }
+  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted') {
+    return res.status(400).json({ error: '当前状态不允许标记不适合送审' });
+  }
+
+  db.prepare(`
+    UPDATE papers 
+    SET status = 'not_suitable', 
+        editor_id = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(req.user.id, id);
+
+  if (comments) {
+    db.prepare(`
+      INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version)
+      VALUES (?, ?, 'not_suitable', ?, ?)
+    `).run(id, req.user.id, comments, paper.current_version);
+  }
+
+  addNotification(paper.corresponding_author_id, 'editor_decision', '稿件处理通知',
+    `您的论文"${paper.title}"经编辑初审，不适合送审，请登录查看详情`, id);
+
+  const updatedPaper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
+  res.json({ success: true, paper: updatedPaper });
+});
+
+router.post('/:id/screening/send-to-review', authMiddleware, requireRole('editor'), (req, res) => {
+  const { id } = req.params;
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
+  if (!paper) {
+    return res.status(404).json({ error: '论文不存在' });
+  }
+  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted') {
+    return res.status(400).json({ error: '当前状态不允许送审' });
+  }
+
+  db.prepare(`
+    UPDATE papers 
+    SET status = 'submitted', 
+        editor_id = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(req.user.id, id);
+
+  addNotification(paper.corresponding_author_id, 'editor_decision', '稿件进入审稿',
+    `您的论文"${paper.title}"已通过初审，即将进入同行评审`, id);
+
+  const updatedPaper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
+  res.json({ success: true, paper: updatedPaper });
 });
 
 module.exports = router;

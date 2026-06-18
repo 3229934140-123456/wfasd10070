@@ -65,7 +65,7 @@ export default function PaperDetail() {
   }
 
   const isAuthor = user?.role === 'author';
-  const canRevise = isAuthor && paper.status === 'revise';
+  const canRevise = isAuthor && (paper.status === 'revise' || paper.status === 'needs_revision');
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -124,6 +124,22 @@ export default function PaperDetail() {
             ))}
           </div>
         </div>
+
+        {paper.fields && paper.fields.length > 0 && (
+          <div className="mb-6">
+            <h3 className="font-semibold text-gray-800 mb-2">研究领域</h3>
+            <div className="flex flex-wrap gap-2">
+              {paper.fields.map((field: any, i: number) => (
+                <span
+                  key={i}
+                  className="px-3 py-1 bg-primary-50 text-primary-700 rounded-full text-sm"
+                >
+                  {field.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div>
           <h3 className="font-semibold text-gray-800 mb-3">作者</h3>

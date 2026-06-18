@@ -1,5 +1,7 @@
 export const statusLabels: Record<string, string> = {
   submitted: '已提交',
+  needs_revision: '退回补资料',
+  not_suitable: '不适合送审',
   under_review: '审稿中',
   revise: '待修改',
   revision_submitted: '修改稿已提交',
@@ -19,6 +21,8 @@ export const decisionLabels: Record<string, string> = {
   minor_revision: '小修',
   major_revision: '大修',
   reject: '拒绝',
+  request_revision: '退回补资料',
+  not_suitable: '不适合送审',
 };
 
 export const recommendationLabels: Record<string, string> = {
