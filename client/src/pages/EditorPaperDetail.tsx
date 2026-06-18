@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../utils/api';
-import { formatDate, statusLabels, decisionLabels, recommendationLabels } from '../utils/format';
+import { formatDate, formatDateTime, statusLabels, statusColors, decisionLabels, recommendationLabels } from '../utils/format';
 import {
   ArrowLeft, Download, UserPlus, Bell, CheckCircle, XCircle,
-  FileText, Users, MessageSquare, Clock, Eye
+  FileText, Users, MessageSquare, Clock, Eye, History, User,
+  Loader2, AlertCircle
 } from 'lucide-react';
 
 export default function EditorPaperDetail() {
@@ -25,6 +26,8 @@ export default function EditorPaperDetail() {
   const [showScreeningModal, setShowScreeningModal] = useState(false);
   const [screeningAction, setScreeningAction] = useState<'request_revision' | 'mark_unsuitable' | null>(null);
   const [screeningComments, setScreeningComments] = useState('');
+  const [reviewerPool, setReviewerPool] = useState<any>(null);
+  const [poolLoading, setPoolLoading] = useState(false);
 
   useEffect(() => {
     loadPaper();
@@ -35,10 +38,25 @@ export default function EditorPaperDetail() {
     try {
       const res = await api.get(`/papers/${id}`);
       setPaper(res.data.paper);
+      if (res.data.paper.status === 'under_review' || res.data.paper.status === 'pending_assignment') {
+        loadReviewerPool();
+      }
     } catch (err) {
       console.error('加载稿件失败', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadReviewerPool = async () => {
+    setPoolLoading(true);
+    try {
+      const res = await api.get(`/reviews/paper/${id}/reviewer-pool`);
+      setReviewerPool(res.data);
+    } catch (err) {
+      console.error('加载候选池进度失败', err);
+    } finally {
+      setPoolLoading(false);
     }
   };
 
@@ -73,6 +91,7 @@ export default function EditorPaperDetail() {
       });
       setShowAssignModal(false);
       loadPaper();
+      loadReviewerPool();
     } catch (err: any) {
       alert(err.response?.data?.error || '分配失败');
     } finally {
@@ -173,7 +192,7 @@ export default function EditorPaperDetail() {
   };
 
   const canScreen = paper.status === 'submitted' || paper.status === 'revision_submitted';
-  const canAssign = paper.status === 'submitted' || paper.status === 'revision_submitted';
+  const canAssign = paper.status === 'pending_assignment';
   const canMakeDecision = paper.reviews?.filter((r: any) => r.status === 'completed').length > 0;
   const completedCount = paper.reviews?.filter((r: any) => r.status === 'completed').length || 0;
   const acceptedCount = paper.reviews?.filter((r: any) => r.status === 'accepted').length || 0;
@@ -253,7 +272,7 @@ export default function EditorPaperDetail() {
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <div className="flex items-start justify-between mb-4">
               <h1 className="text-xl font-bold text-gray-800">{paper.title}</h1>
-              <span className={`status-badge status-${paper.status} whitespace-nowrap`}>
+              <span className={`px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap ${statusColors[paper.status] || 'bg-gray-100 text-gray-700'}`}>
                 {statusLabels[paper.status] || paper.status}
               </span>
             </div>
@@ -351,6 +370,60 @@ export default function EditorPaperDetail() {
               ))}
             </div>
           </div>
+
+          {paper.decisions && paper.decisions.length > 0 && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <History size={20} className="text-gray-400" />
+                <h3 className="font-semibold text-gray-800">处理流程记录</h3>
+              </div>
+              
+              <div className="relative">
+                <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-gray-200"></div>
+                
+                <div className="space-y-6">
+                  {paper.decisions.map((d: any, i: number) => (
+                    <div key={d.id} className="relative pl-10">
+                      <div className="absolute left-2 top-1.5 w-5 h-5 bg-white border-2 border-primary-500 rounded-full flex items-center justify-center">
+                        <div className="w-2 h-2 bg-primary-500 rounded-full"></div>
+                      </div>
+                      
+                      <div className="bg-gray-50 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                              d.decision === 'screening_passed' ? 'bg-green-100 text-green-700' :
+                              d.decision === 'reviewers_assigned' ? 'bg-blue-100 text-blue-700' :
+                              d.decision === 'request_revision' ? 'bg-yellow-100 text-yellow-700' :
+                              d.decision === 'not_suitable' ? 'bg-red-100 text-red-700' :
+                              d.decision === 'accept' ? 'bg-green-100 text-green-700' :
+                              d.decision === 'reject' ? 'bg-red-100 text-red-700' :
+                              'bg-gray-100 text-gray-700'
+                            }`}>
+                              {decisionLabels[d.decision] || d.decision}
+                            </span>
+                            <span className="text-xs text-gray-500 flex items-center gap-1">
+                              <Clock size={12} />
+                              {formatDateTime(d.decision_date)}
+                            </span>
+                          </div>
+                          {d.editor_name && (
+                            <span className="text-xs text-gray-500 flex items-center gap-1">
+                              <User size={12} />
+                              {d.editor_name}
+                            </span>
+                          )}
+                        </div>
+                        {d.comments && (
+                          <p className="text-sm text-gray-600 whitespace-pre-wrap">{d.comments}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-6">
@@ -398,6 +471,123 @@ export default function EditorPaperDetail() {
             )}
           </div>
 
+          {reviewerPool && reviewerPool.pool && reviewerPool.pool.length > 0 && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+                  <Loader2 size={18} className="text-primary-500" />
+                  候选池进度
+                </h3>
+                <button
+                  onClick={loadReviewerPool}
+                  className="text-xs text-primary-600 hover:text-primary-700"
+                >
+                  刷新
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <div className="bg-blue-50 rounded-lg p-3 text-center">
+                  <p className="text-xl font-bold text-blue-600">{reviewerPool.validCount}/{reviewerPool.requiredReviews}</p>
+                  <p className="text-xs text-blue-600 mt-1">有效意见</p>
+                </div>
+                <div className="bg-orange-50 rounded-lg p-3 text-center">
+                  <p className="text-xl font-bold text-orange-600">{reviewerPool.remainingNeeded}</p>
+                  <p className="text-xs text-orange-600 mt-1">还差</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                {reviewerPool.pool.map((item: any, idx: number) => {
+                  const isCurrent = idx === reviewerPool.currentInvitedIndex;
+                  const isDeclined = item.pool_status === 'declined';
+                  const isCompleted = item.review_status === 'completed';
+                  const isAccepted = item.review_status === 'accepted';
+                  const isPending = item.pool_status === 'pending';
+                  
+                  let statusColor = 'bg-gray-100 text-gray-600';
+                  let statusIcon: any = Clock;
+                  
+                  if (isCompleted) {
+                    statusColor = 'bg-green-100 text-green-700';
+                    statusIcon = CheckCircle;
+                  } else if (isDeclined) {
+                    statusColor = 'bg-red-100 text-red-700';
+                    statusIcon = XCircle;
+                  } else if (isAccepted) {
+                    statusColor = 'bg-blue-100 text-blue-700';
+                    statusIcon = Users;
+                  } else if (isCurrent) {
+                    statusColor = 'bg-yellow-100 text-yellow-700';
+                    statusIcon = Loader2;
+                  } else if (isPending) {
+                    statusColor = 'bg-gray-100 text-gray-500';
+                    statusIcon = Clock;
+                  }
+
+                  const StatusIcon = statusIcon;
+                  
+                  return (
+                    <div
+                      key={idx}
+                      className={`flex items-center gap-3 p-3 rounded-lg border transition-all ${
+                        isCurrent ? 'border-yellow-300 bg-yellow-50' : 
+                        isDeclined ? 'border-red-200 bg-red-50/50' :
+                        isCompleted ? 'border-green-200 bg-green-50/50' :
+                        'border-gray-200 bg-gray-50/50'
+                      }`}
+                    >
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${statusColor}`}>
+                        <span className="text-sm font-bold">{idx + 1}</span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-800 text-sm truncate">
+                            {item.reviewer_name}
+                          </span>
+                          <StatusIcon size={12} className={
+                            isCompleted ? 'text-green-600' :
+                            isDeclined ? 'text-red-600' :
+                            isCurrent ? 'text-yellow-600 animate-spin' :
+                            'text-gray-400'
+                          } />
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className={`text-xs px-2 py-0.5 rounded ${statusColor}`}>
+                            {isCompleted ? '已完成' :
+                             isDeclined ? '已拒绝' :
+                             isAccepted ? '审稿中' :
+                             isCurrent ? '已邀请' :
+                             '等待中'}
+                          </span>
+                          {item.recommendation && isCompleted && (
+                            <span className="text-xs text-gray-500">
+                              · {recommendationLabels[item.recommendation]}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {item.review_status === 'invited' && (
+                        <button
+                          onClick={() => handleRemind(item.review_id)}
+                          className="p-1.5 text-gray-400 hover:text-primary-600 hover:bg-primary-50 rounded"
+                          title="发送催审"
+                        >
+                          <Bell size={14} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-100 text-xs text-gray-500">
+                <span>共 {reviewerPool.totalCandidates} 位候选人</span>
+                <span>{reviewerPool.declinedCount} 位拒绝 · {reviewerPool.pendingCount} 位等待</span>
+              </div>
+            </div>
+          )}
+
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h3 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
               <MessageSquare size={18} />
@@ -417,11 +607,18 @@ export default function EditorPaperDetail() {
                       <span className="font-medium text-gray-800">
                         {review.reviewer_name || '审稿人'}
                       </span>
-                      <span className={`status-badge review-${review.status}`}>
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                        review.status === 'completed' ? 'bg-green-100 text-green-700' :
+                        review.status === 'accepted' ? 'bg-blue-100 text-blue-700' :
+                        review.status === 'declined' ? 'bg-red-100 text-red-700' :
+                        review.status === 'invited' ? 'bg-yellow-100 text-yellow-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>
                         {review.status === 'invited' ? '已邀请' :
                          review.status === 'accepted' ? '进行中' :
                          review.status === 'completed' ? '已完成' :
-                         review.status === 'declined' ? '已拒绝' : review.status}
+                         review.status === 'declined' ? '已拒绝' :
+                         review.status}
                       </span>
                     </div>
                     

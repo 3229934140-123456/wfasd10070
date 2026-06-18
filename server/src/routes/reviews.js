@@ -161,6 +161,12 @@ router.post('/:id/accept', authMiddleware, requireRole('reviewer'), (req, res) =
     WHERE id = ?
   `).run(id);
 
+  db.prepare(`
+    UPDATE review_backups 
+    SET status = 'invited'
+    WHERE paper_id = ? AND reviewer_id = ?
+  `).run(review.paper_id, review.reviewer_id);
+
   const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(review.paper_id);
   addNotification(paper.corresponding_author_id, 'review_accepted', '审稿人接受邀请', 
     '一位审稿人已接受您的论文审稿邀请', review.paper_id);
@@ -375,6 +381,9 @@ router.post('/paper/:paperId/assign', authMiddleware, requireRole('editor'), (re
   if (!paper) {
     return res.status(404).json({ error: '论文不存在' });
   }
+  if (paper.status !== 'pending_assignment') {
+    return res.status(400).json({ error: '当前状态不允许分配审稿人，请先通过初审' });
+  }
 
   const dueDate = new Date();
   dueDate.setDate(dueDate.getDate() + due_days);
@@ -406,6 +415,21 @@ router.post('/paper/:paperId/assign', authMiddleware, requireRole('editor'), (re
 
     addNotification(firstReviewer, 'review_invite', '审稿邀请',
       `您被邀请为论文"${paper.title}"审稿`, paperId);
+
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version, decision_date)
+      VALUES (?, ?, 'reviewers_assigned', '已分配审稿人，正式进入审稿', ?, ?)
+    `).run(paperId, req.user.id, paper.current_version, now);
+
+    const editor = db.prepare('SELECT name FROM users WHERE id = ?').get(req.user.id);
+    const editorName = editor?.name || '编辑';
+    const content = `【分配审稿人】处理人：${editorName}，处理时间：${new Date(now).toLocaleString('zh-CN')}，已分配 ${reviewerIds.length} 位审稿人候选，需要 ${required_reviews} 份有效意见`;
+    
+    addNotification(paper.corresponding_author_id, 'editor_decision',
+      `稿件"${paper.title}" 正式进入审稿`, content, paperId);
+    addNotification(req.user.id, 'editor_decision',
+      `已为稿件"${paper.title}"分配审稿人`, content, paperId);
   });
 
   res.json({ success: true, message: '审稿人已分配' });
@@ -446,6 +470,68 @@ router.get('/paper/:paperId/decision', authMiddleware, requireRole('editor'), (r
   `).all(paperId);
 
   res.json({ decisions });
+});
+
+router.get('/paper/:paperId/reviewer-pool', authMiddleware, requireRole('editor'), (req, res) => {
+  const { paperId } = req.params;
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(paperId);
+  if (!paper) {
+    return res.status(404).json({ error: '论文不存在' });
+  }
+
+  const requiredReviews = paper.required_reviews || 3;
+
+  const completedCount = db.prepare(`
+    SELECT COUNT(*) as count FROM reviews WHERE paper_id = ? AND status = 'completed'
+  `).get(paperId).count;
+
+  const acceptedCount = db.prepare(`
+    SELECT COUNT(*) as count FROM reviews WHERE paper_id = ? AND status = 'accepted'
+  `).get(paperId).count;
+
+  const validCount = completedCount + acceptedCount;
+  const remainingNeeded = Math.max(0, requiredReviews - validCount);
+
+  const pool = db.prepare(`
+    SELECT 
+      rb.reviewer_order,
+      rb.status as pool_status,
+      rb.invited_at,
+      u.id as reviewer_id,
+      u.name as reviewer_name,
+      u.email as reviewer_email,
+      u.affiliation as reviewer_affiliation,
+      r.status as review_status,
+      r.id as review_id,
+      r.recommendation,
+      r.invitation_date,
+      r.accepted_date,
+      r.completed_date,
+      r.due_date
+    FROM review_backups rb
+    LEFT JOIN users u ON rb.reviewer_id = u.id
+    LEFT JOIN reviews r ON rb.paper_id = r.paper_id AND rb.reviewer_id = r.reviewer_id
+    WHERE rb.paper_id = ?
+    ORDER BY rb.reviewer_order ASC
+  `).all(paperId);
+
+  const currentInvitedIndex = pool.findIndex(p => p.pool_status === 'invited' && (p.review_status === 'invited' || p.review_status === 'accepted'));
+  const declinedCount = pool.filter(p => p.pool_status === 'declined').length;
+  const pendingCount = pool.filter(p => p.pool_status === 'pending').length;
+
+  res.json({
+    pool,
+    requiredReviews,
+    validCount,
+    completedCount,
+    acceptedCount,
+    remainingNeeded,
+    currentInvitedIndex,
+    declinedCount,
+    pendingCount,
+    totalCandidates: pool.length,
+  });
 });
 
 router.post('/paper/:paperId/decision', authMiddleware, requireRole('editor'), (req, res) => {

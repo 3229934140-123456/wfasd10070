@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
-import { formatDate, statusLabels } from '../utils/format';
+import { formatDate, statusLabels, statusColors } from '../utils/format';
 import { Plus, Search, Filter, Users } from 'lucide-react';
 
 export default function Papers() {
@@ -34,6 +34,9 @@ export default function Papers() {
   const statusOptions = [
     { value: 'all', label: '全部' },
     { value: 'submitted', label: '已提交' },
+    { value: 'needs_revision', label: '退回补资料' },
+    { value: 'not_suitable', label: '不适合送审' },
+    { value: 'pending_assignment', label: '待分配审稿人' },
     { value: 'under_review', label: '审稿中' },
     { value: 'revise', label: '待修改' },
     { value: 'revision_submitted', label: '修改稿已提交' },
@@ -97,7 +100,7 @@ export default function Papers() {
                       {paper.title}
                     </h3>
                     <div className="flex items-center gap-4 mt-2 flex-wrap">
-                      <span className={`status-badge status-${paper.status}`}>
+                      <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${statusColors[paper.status] || 'bg-gray-100 text-gray-700'}`}>
                         {statusLabels[paper.status] || paper.status}
                       </span>
                     </div>

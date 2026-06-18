@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
 import api from '../utils/api';
-import { formatDate, statusLabels, decisionLabels, recommendationLabels } from '../utils/format';
-import { ArrowLeft, Download, Edit, FileText, MessageSquare, Clock, CheckCircle } from 'lucide-react';
+import { formatDate, formatDateTime, statusLabels, statusColors, decisionLabels, recommendationLabels } from '../utils/format';
+import { ArrowLeft, Download, Edit, FileText, MessageSquare, Clock, CheckCircle, History, User } from 'lucide-react';
 
 export default function PaperDetail() {
   const { id } = useParams();
@@ -93,7 +93,7 @@ export default function PaperDetail() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <div className="flex items-start justify-between mb-4">
           <h1 className="text-xl font-bold text-gray-800">{paper.title}</h1>
-          <span className={`status-badge status-${paper.status} whitespace-nowrap`}>
+          <span className={`px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap ${statusColors[paper.status] || 'bg-gray-100 text-gray-700'}`}>
             {statusLabels[paper.status] || paper.status}
           </span>
         </div>
@@ -202,6 +202,58 @@ export default function PaperDetail() {
           ))}
         </div>
       </div>
+
+      {paper.decisions && paper.decisions.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="flex items-center gap-2 mb-4">
+            <History size={20} className="text-gray-400" />
+            <h3 className="font-semibold text-gray-800">处理流程记录</h3>
+          </div>
+          
+          <div className="relative">
+            <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-gray-200"></div>
+            
+            <div className="space-y-6">
+              {paper.decisions.map((d: any, i: number) => (
+                <div key={d.id} className="relative pl-10">
+                  <div className="absolute left-2 top-1.5 w-5 h-5 bg-white border-2 border-primary-500 rounded-full flex items-center justify-center">
+                    <div className="w-2 h-2 bg-primary-500 rounded-full"></div>
+                  </div>
+                  
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                          d.decision === 'screening_passed' ? 'bg-green-100 text-green-700' :
+                          d.decision === 'reviewers_assigned' ? 'bg-blue-100 text-blue-700' :
+                          d.decision === 'request_revision' ? 'bg-yellow-100 text-yellow-700' :
+                          d.decision === 'not_suitable' ? 'bg-red-100 text-red-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {decisionLabels[d.decision] || d.decision}
+                        </span>
+                        <span className="text-xs text-gray-500 flex items-center gap-1">
+                          <Clock size={12} />
+                          {formatDateTime(d.decision_date)}
+                        </span>
+                      </div>
+                      {d.editor_name && (
+                        <span className="text-xs text-gray-500 flex items-center gap-1">
+                          <User size={12} />
+                          {d.editor_name}
+                        </span>
+                      )}
+                    </div>
+                    {d.comments && (
+                      <p className="text-sm text-gray-600 whitespace-pre-wrap">{d.comments}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {paper.reviews && paper.reviews.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">

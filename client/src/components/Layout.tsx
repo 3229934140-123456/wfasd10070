@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import api from '../utils/api';
+import { formatDateTime } from '../utils/format';
 
 interface Notification {
   id: number;
@@ -22,6 +23,7 @@ interface Notification {
   type: string;
   is_read: number;
   created_at: string;
+  related_id: string | null;
 }
 
 export default function Layout() {
@@ -173,14 +175,18 @@ export default function Layout() {
                           onClick={() => {
                             markAsRead(n.id);
                             setShowNotifications(false);
+                            if (n.related_id) {
+                              const isEditor = user?.role === 'editor';
+                              navigate(isEditor ? `/editor/papers/${n.related_id}` : `/papers/${n.related_id}`);
+                            }
                           }}
                           className={`p-3 border-b border-gray-100 cursor-pointer hover:bg-gray-50 ${
                             n.is_read ? 'bg-white' : 'bg-blue-50'
                           }`}
                         >
                           <p className="text-sm font-medium text-gray-800">{n.title}</p>
-                          <p className="text-xs text-gray-500 mt-1">{n.content}</p>
-                          <p className="text-xs text-gray-400 mt-1">{n.created_at}</p>
+                          <p className="text-xs text-gray-500 mt-1 line-clamp-2">{n.content}</p>
+                          <p className="text-xs text-gray-400 mt-1">{formatDateTime(n.created_at)}</p>
                         </div>
                       ))
                     )}

@@ -499,7 +499,7 @@ router.post('/:id/screening/request-revision', authMiddleware, requireRole('edit
   if (!paper) {
     return res.status(404).json({ error: '论文不存在' });
   }
-  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted') {
+  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted' && paper.status !== 'pending_assignment') {
     return res.status(400).json({ error: '当前状态不允许退回补资料' });
   }
 
@@ -511,15 +511,22 @@ router.post('/:id/screening/request-revision', authMiddleware, requireRole('edit
     WHERE id = ?
   `).run(req.user.id, id);
 
-  if (comments) {
-    db.prepare(`
-      INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version)
-      VALUES (?, ?, 'request_revision', ?, ?)
-    `).run(id, req.user.id, comments, paper.current_version);
-  }
+  const now = new Date().toISOString();
+  const actionLabel = '退回补资料';
+  
+  db.prepare(`
+    INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version, decision_date)
+    VALUES (?, ?, 'request_revision', ?, ?, ?)
+  `).run(id, req.user.id, comments || '', paper.current_version, now);
 
-  addNotification(paper.corresponding_author_id, 'editor_decision', '退回补资料通知',
-    `您的论文"${paper.title}"需要补充资料，请登录查看编辑意见`, id);
+  const editor = db.prepare('SELECT name FROM users WHERE id = ?').get(req.user.id);
+  const editorName = editor?.name || '编辑';
+  const content = `【${actionLabel}】处理人：${editorName}，处理时间：${new Date(now).toLocaleString('zh-CN')}${comments ? '，编辑意见：' + comments : ''}`;
+
+  addNotification(paper.corresponding_author_id, 'editor_decision', 
+    `稿件"${paper.title}" ${actionLabel}`, content, id);
+  addNotification(req.user.id, 'editor_decision',
+    `您已将稿件"${paper.title}" ${actionLabel}`, content, id);
 
   const updatedPaper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
   res.json({ success: true, paper: updatedPaper });
@@ -533,7 +540,7 @@ router.post('/:id/screening/mark-unsuitable', authMiddleware, requireRole('edito
   if (!paper) {
     return res.status(404).json({ error: '论文不存在' });
   }
-  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted') {
+  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted' && paper.status !== 'pending_assignment') {
     return res.status(400).json({ error: '当前状态不允许标记不适合送审' });
   }
 
@@ -545,15 +552,22 @@ router.post('/:id/screening/mark-unsuitable', authMiddleware, requireRole('edito
     WHERE id = ?
   `).run(req.user.id, id);
 
-  if (comments) {
-    db.prepare(`
-      INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version)
-      VALUES (?, ?, 'not_suitable', ?, ?)
-    `).run(id, req.user.id, comments, paper.current_version);
-  }
+  const now = new Date().toISOString();
+  const actionLabel = '不适合送审';
+  
+  db.prepare(`
+    INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version, decision_date)
+    VALUES (?, ?, 'not_suitable', ?, ?, ?)
+  `).run(id, req.user.id, comments || '', paper.current_version, now);
 
-  addNotification(paper.corresponding_author_id, 'editor_decision', '稿件处理通知',
-    `您的论文"${paper.title}"经编辑初审，不适合送审，请登录查看详情`, id);
+  const editor = db.prepare('SELECT name FROM users WHERE id = ?').get(req.user.id);
+  const editorName = editor?.name || '编辑';
+  const content = `【${actionLabel}】处理人：${editorName}，处理时间：${new Date(now).toLocaleString('zh-CN')}${comments ? '，编辑说明：' + comments : ''}`;
+
+  addNotification(paper.corresponding_author_id, 'editor_decision',
+    `稿件"${paper.title}" ${actionLabel}`, content, id);
+  addNotification(req.user.id, 'editor_decision',
+    `您已标记稿件"${paper.title}" ${actionLabel}`, content, id);
 
   const updatedPaper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
   res.json({ success: true, paper: updatedPaper });
@@ -566,20 +580,34 @@ router.post('/:id/screening/send-to-review', authMiddleware, requireRole('editor
   if (!paper) {
     return res.status(404).json({ error: '论文不存在' });
   }
-  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted') {
+  if (paper.status !== 'submitted' && paper.status !== 'revision_submitted' && paper.status !== 'pending_assignment') {
     return res.status(400).json({ error: '当前状态不允许送审' });
   }
 
   db.prepare(`
     UPDATE papers 
-    SET status = 'submitted', 
+    SET status = 'pending_assignment', 
         editor_id = ?,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(req.user.id, id);
 
-  addNotification(paper.corresponding_author_id, 'editor_decision', '稿件进入审稿',
-    `您的论文"${paper.title}"已通过初审，即将进入同行评审`, id);
+  const now = new Date().toISOString();
+  const actionLabel = '通过初审';
+  
+  db.prepare(`
+    INSERT INTO paper_decisions (paper_id, editor_id, decision, comments, paper_version, decision_date)
+    VALUES (?, ?, 'screening_passed', '通过初审，待分配审稿人', ?, ?)
+  `).run(id, req.user.id, paper.current_version, now);
+
+  const editor = db.prepare('SELECT name FROM users WHERE id = ?').get(req.user.id);
+  const editorName = editor?.name || '编辑';
+  const content = `【${actionLabel}】处理人：${editorName}，处理时间：${new Date(now).toLocaleString('zh-CN')}，稿件已通过初审，等待编辑分配审稿人后正式进入评审`;
+
+  addNotification(paper.corresponding_author_id, 'editor_decision',
+    `稿件"${paper.title}" ${actionLabel}`, content, id);
+  addNotification(req.user.id, 'editor_decision',
+    `稿件"${paper.title}" ${actionLabel}`, content, id);
 
   const updatedPaper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
   res.json({ success: true, paper: updatedPaper });
