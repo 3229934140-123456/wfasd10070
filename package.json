@@ -1,0 +1,15 @@
+{
+  "name": "peer-review-system",
+  "version": "1.0.0",
+  "description": "学术论文投稿与同行评审管理系统",
+  "scripts": {
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start"
+  },
+  "keywords": ["peer-review", "academic", "journal"],
+  "author": "",
+  "license": "MIT"
+}

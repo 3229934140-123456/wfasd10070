@@ -1,0 +1,477 @@
+const express = require('express');
+const { v4: uuidv4 } = require('uuid');
+const { db, transaction } = require('../database/init');
+const { authMiddleware, requireRole } = require('../middleware/auth');
+
+const router = express.Router();
+
+function addNotification(userId, type, title, content, relatedId) {
+  db.prepare(`
+    INSERT INTO notifications (user_id, type, title, content, related_id)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(userId, type, title, content, relatedId || null);
+}
+
+function getNextBackupReviewer(paperId) {
+  return db.prepare(`
+    SELECT r.reviewer_id, r.reviewer_order
+    FROM review_backups r
+    WHERE r.paper_id = ? AND r.status = 'pending'
+    ORDER BY r.reviewer_order ASC
+    LIMIT 1
+  `).get(paperId);
+}
+
+function inviteNextReviewer(paperId) {
+  const next = getNextBackupReviewer(paperId);
+  if (!next) return null;
+
+  const reviewId = uuidv4();
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + 14);
+
+  db.prepare(`
+    INSERT INTO reviews (id, paper_id, reviewer_id, status, invitation_date, due_date)
+    VALUES (?, ?, ?, 'invited', CURRENT_TIMESTAMP, ?)
+  `).run(reviewId, paperId, next.reviewer_id, dueDate.toISOString());
+
+  db.prepare(`
+    UPDATE review_backups 
+    SET status = 'invited', invited_at = CURRENT_TIMESTAMP
+    WHERE paper_id = ? AND reviewer_id = ?
+  `).run(paperId, next.reviewer_id);
+
+  const reviewer = db.prepare('SELECT name, email FROM users WHERE id = ?').get(next.reviewer_id);
+  addNotification(next.reviewer_id, 'review_invite', '审稿邀请', '您有一篇新的审稿邀请', paperId);
+
+  return { reviewId, reviewerId: next.reviewer_id };
+}
+
+router.get('/my', authMiddleware, requireRole('reviewer'), (req, res) => {
+  const { status, page = 1, limit = 10 } = req.query;
+  const offset = (page - 1) * limit;
+
+  let whereClause = '';
+  let params = [req.user.id];
+
+  if (status && status !== 'all') {
+    whereClause = 'AND r.status = ?';
+    params.push(status);
+  }
+
+  const reviews = db.prepare(`
+    SELECT r.*, p.title, p.abstract, p.status as paper_status,
+           p.current_version, p.submitted_at
+    FROM reviews r
+    JOIN papers p ON r.paper_id = p.id
+    WHERE r.reviewer_id = ? ${whereClause ? 'AND ' + whereClause.slice(4) : ''}
+    ORDER BY r.invitation_date DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, parseInt(limit), offset);
+
+  const total = db.prepare(`
+    SELECT COUNT(*) as count FROM reviews WHERE reviewer_id = ? ${whereClause ? 'AND ' + whereClause.slice(4) : ''}
+  `).get(...params).count;
+
+  reviews.forEach(review => {
+    const keywords = db.prepare(`
+      SELECT keyword FROM paper_keywords WHERE paper_id = ?
+    `).all(review.paper_id).map(k => k.keyword);
+    review.keywords = keywords;
+  });
+
+  res.json({
+    reviews,
+    total,
+    page: parseInt(page),
+    limit: parseInt(limit),
+    totalPages: Math.ceil(total / limit)
+  });
+});
+
+router.get('/:id', authMiddleware, (req, res) => {
+  const { id } = req.params;
+
+  const review = db.prepare(`
+    SELECT r.*, p.title, p.abstract, p.status as paper_status,
+           p.current_version, p.file_path, p.file_name, p.submitted_at
+    FROM reviews r
+    JOIN papers p ON r.paper_id = p.id
+    WHERE r.id = ?
+  `).get(id);
+
+  if (!review) {
+    return res.status(404).json({ error: '审稿不存在' });
+  }
+
+  if (req.user.role === 'reviewer' && review.reviewer_id !== req.user.id) {
+    return res.status(403).json({ error: '无权查看此审稿' });
+  }
+
+  if (req.user.role === 'author') {
+    const paper = db.prepare('SELECT corresponding_author_id FROM papers WHERE id = ?').get(review.paper_id);
+    if (paper.corresponding_author_id !== req.user.id) {
+      return res.status(403).json({ error: '无权查看此审稿' });
+    }
+  }
+
+  const responses = db.prepare(`
+    SELECT * FROM author_responses WHERE review_id = ? ORDER BY submitted_at DESC
+  `).all(id);
+
+  res.json({ review, responses });
+});
+
+router.post('/:id/accept', authMiddleware, requireRole('reviewer'), (req, res) => {
+  const { id } = req.params;
+
+  const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  if (!review) {
+    return res.status(404).json({ error: '审稿不存在' });
+  }
+
+  if (review.reviewer_id !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此审稿' });
+  }
+
+  if (review.status !== 'invited') {
+    return res.status(400).json({ error: '此审稿状态不允许接受' });
+  }
+
+  db.prepare(`
+    UPDATE reviews 
+    SET status = 'accepted', accepted_date = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(review.paper_id);
+  addNotification(paper.corresponding_author_id, 'review_accepted', '审稿人接受邀请', 
+    '一位审稿人已接受您的论文审稿邀请', review.paper_id);
+
+  const updatedReview = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  res.json({ review: updatedReview });
+});
+
+router.post('/:id/decline', authMiddleware, requireRole('reviewer'), (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  if (!review) {
+    return res.status(404).json({ error: '审稿不存在' });
+  }
+
+  if (review.reviewer_id !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此审稿' });
+  }
+
+  if (review.status !== 'invited') {
+    return res.status(400).json({ error: '此审稿状态不允许拒绝' });
+  }
+
+  transaction(() => {
+    db.prepare(`
+      UPDATE reviews 
+      SET status = 'declined', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(id);
+
+    db.prepare(`
+      UPDATE review_backups 
+      SET status = 'declined'
+      WHERE paper_id = ? AND reviewer_id = ?
+    `).run(review.paper_id, review.reviewer_id);
+
+    const nextReviewer = inviteNextReviewer(review.paper_id);
+
+    const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(review.paper_id);
+    addNotification(paper.corresponding_author_id, 'review_declined', '审稿人拒绝邀请',
+      '一位审稿人拒绝了审稿邀请，系统已自动邀请下一位备选审稿人', review.paper_id);
+  });
+
+  res.json({ success: true, message: '已拒绝审稿邀请，系统将自动邀请下一位审稿人' });
+});
+
+router.post('/:id/submit', authMiddleware, requireRole('reviewer'), (req, res) => {
+  const { id } = req.params;
+  const { recommendation, comments_to_author, comments_to_editor } = req.body;
+
+  if (!recommendation) {
+    return res.status(400).json({ error: '请选择审稿建议' });
+  }
+
+  const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  if (!review) {
+    return res.status(404).json({ error: '审稿不存在' });
+  }
+
+  if (review.reviewer_id !== req.user.id) {
+    return res.status(403).json({ error: '无权操作此审稿' });
+  }
+
+  if (review.status !== 'accepted' && review.status !== 'revision_submitted') {
+    return res.status(400).json({ error: '此审稿状态不允许提交意见' });
+  }
+
+  db.prepare(`
+    UPDATE reviews 
+    SET status = 'completed', 
+        recommendation = ?,
+        comments_to_author = ?,
+        comments_to_editor = ?,
+        completed_date = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(recommendation, comments_to_author || '', comments_to_editor || '', id);
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(review.paper_id);
+  
+  const completedCount = db.prepare(`
+    SELECT COUNT(*) as count FROM reviews WHERE paper_id = ? AND status = 'completed'
+  `).get(review.paper_id).count;
+
+  addNotification(paper.corresponding_author_id, 'review_completed', '审稿意见已提交',
+    `一位审稿人已完成审稿（第 ${completedCount} 位审稿人完成`, review.paper_id);
+
+  if (paper.editor_id) {
+    addNotification(paper.editor_id, 'review_completed', '审稿意见已提交',
+      `论文"${paper.title}"的一位审稿人已完成审稿`, review.paper_id);
+  }
+
+  const updatedReview = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  res.json({ review: updatedReview });
+});
+
+router.post('/:id/response', authMiddleware, requireRole('author'), (req, res) => {
+  const { id } = req.params;
+  const { response_text, point_by_point } = req.body;
+
+  const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  if (!review) {
+    return res.status(404).json({ error: '审稿不存在' });
+  }
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(review.paper_id);
+  if (paper.corresponding_author_id !== req.user.id) {
+    return res.status(403).json({ error: '无权回复此审稿' });
+  }
+
+  db.prepare(`
+    INSERT INTO author_responses (review_id, paper_version, response_text, point_by_point)
+    VALUES (?, ?, ?, ?)
+  `).run(id, paper.current_version, response_text || '', point_by_point || '');
+
+  db.prepare(`
+    UPDATE reviews 
+    SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+
+  addNotification(review.reviewer_id, 'author_response', '作者已回复审稿意见',
+    `论文"${paper.title}"的作者已回复您的审稿意见`, review.paper_id);
+
+  res.json({ success: true });
+});
+
+router.get('/paper/:paperId/available-reviewers', authMiddleware, requireRole('editor'), (req, res) => {
+  const { paperId } = req.params;
+
+  const paperFields = db.prepare(`
+    SELECT field_id FROM paper_fields WHERE paper_id = ?
+  `).all(paperId).map(f => f.field_id);
+
+  let reviewers;
+  if (paperFields.length > 0) {
+    const placeholders = paperFields.map(() => '?').join(',');
+    reviewers = db.prepare(`
+      SELECT u.id, u.name, u.email, u.affiliation,
+             (SELECT COUNT(*) FROM reviewer_fields rf WHERE rf.reviewer_id = u.id AND rf.field_id IN (${placeholders})) as match_count
+      FROM users u
+      WHERE u.role = 'reviewer'
+      AND u.id NOT IN (
+        SELECT reviewer_id FROM reviews WHERE paper_id = ?)
+      AND u.id NOT IN (
+        SELECT reviewer_id FROM review_backups WHERE paper_id = ? AND status != 'declined')
+      ORDER BY match_count DESC
+    `).all(...paperFields, paperId, paperId);
+  } else {
+    reviewers = db.prepare(`
+      SELECT u.id, u.name, u.email, u.affiliation, 0 as match_count
+      FROM users u
+      WHERE u.role = 'reviewer'
+      AND u.id NOT IN (
+        SELECT reviewer_id FROM reviews WHERE paper_id = ?)
+      AND u.id NOT IN (
+        SELECT reviewer_id FROM review_backups WHERE paper_id = ? AND status != 'declined')
+    `).all(paperId, paperId);
+  }
+
+  reviewers.forEach(reviewer => {
+    const fields = db.prepare(`
+      SELECT f.name FROM fields f
+      JOIN reviewer_fields rf ON f.id = rf.field_id
+      WHERE rf.reviewer_id = ?
+    `).all(reviewer.id).map(f => f.name);
+    reviewer.fields = fields;
+  });
+
+  res.json({ reviewers });
+});
+
+router.post('/paper/:paperId/assign', authMiddleware, requireRole('editor'), (req, res) => {
+  const { paperId } = req.params;
+  const { reviewerIds, due_days = 14 } = req.body;
+
+  if (!Array.isArray(reviewerIds) || reviewerIds.length === 0) {
+    return res.status(400).json({ error: '请选择至少一位审稿人' });
+  }
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(paperId);
+  if (!paper) {
+    return res.status(404).json({ error: '论文不存在' });
+  }
+
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + due_days);
+
+  transaction(() => {
+    const firstReviewer = reviewerIds[0];
+    const reviewId = uuidv4();
+
+    db.prepare(`
+      INSERT INTO reviews (id, paper_id, reviewer_id, status, invitation_date, due_date)
+      VALUES (?, ?, ?, 'invited', CURRENT_TIMESTAMP, ?)
+    `).run(reviewId, paperId, firstReviewer, dueDate.toISOString());
+
+    const insertBackup = db.prepare(`
+      INSERT INTO review_backups (paper_id, reviewer_id, reviewer_order, status)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    reviewerIds.forEach((reviewerId, index) => {
+      const status = index === 0 ? 'invited' : 'pending';
+      insertBackup.run(paperId, reviewerId, index + 1, status);
+    });
+
+    db.prepare(`
+      UPDATE papers 
+      SET status = 'under_review', editor_id = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(req.user.id, paperId);
+
+    reviewerIds.forEach((reviewerId, index) => {
+      addNotification(reviewerId, 'review_invite', '审稿邀请',
+        `您被邀请为论文"${paper.title}"审稿`, paperId);
+    });
+  });
+
+  res.json({ success: true, message: '审稿人已分配' });
+});
+
+router.post('/:id/remind', authMiddleware, requireRole('editor'), (req, res) => {
+  const { id } = req.params;
+
+  const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  if (!review) {
+    return res.status(404).json({ error: '审稿不存在' });
+  }
+
+  if (review.status !== 'accepted') {
+    return res.status(400).json({ error: '只能催审已接受的审稿' });
+  }
+
+  db.prepare(`
+    UPDATE reviews SET reminder_sent = reminder_sent + 1, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+
+  addNotification(review.reviewer_id, 'review_reminder', '审稿催审提醒',
+    '请尽快完成审稿，感谢您的支持！', review.paper_id);
+
+  res.json({ success: true, message: '催审提醒已发送' });
+});
+
+router.get('/paper/:paperId/decision', authMiddleware, requireRole('editor'), (req, res) => {
+  const { paperId } = req.params;
+
+  const decisions = db.prepare(`
+    SELECT pd.*, u.name as editor_name
+    FROM paper_decisions pd
+    LEFT JOIN users u ON pd.editor_id = u.id
+    WHERE pd.paper_id = ?
+    ORDER BY pd.decision_date DESC
+  `).all(paperId);
+
+  res.json({ decisions });
+});
+
+router.post('/paper/:paperId/decision', authMiddleware, requireRole('editor'), (req, res) => {
+  const { paperId } = req.params;
+  const { decision, comments } = req.body;
+
+  if (!decision) {
+    return res.status(400).json({ error: '请选择决定' });
+  }
+
+  const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(paperId);
+  if (!paper) {
+    return res.status(404).json({ error: '论文不存在' });
+  }
+
+  const validDecisions = ['accept', 'minor_revision', 'major_revision', 'reject'];
+  if (!validDecisions.includes(decision)) {
+    return res.status(400).json({ error: '无效的决定' });
+  }
+
+  transaction(() => {
+    db.prepare(`
+      INSERT INTO paper_decisions (paper_id, decision, editor_id, comments, paper_version)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(paperId, decision, req.user.id, comments || '', paper.current_version);
+
+    let paperStatus;
+    switch (decision) {
+      case 'accept':
+        paperStatus = 'accepted';
+        break;
+      case 'reject':
+        paperStatus = 'rejected';
+        break;
+      case 'minor_revision':
+      case 'major_revision':
+        paperStatus = 'revise';
+        break;
+      default:
+        paperStatus = decision;
+    }
+
+    db.prepare(`
+      UPDATE papers 
+      SET status = ?, decision = ?, decision_date = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(paperStatus, decision, paperId);
+
+    addNotification(paper.corresponding_author_id, 'paper_decision', '论文审稿结果通知',
+      `您的论文"${paper.title}"已做出决定：${decision}`, paperId);
+  });
+
+  res.json({ success: true, message: '决定已发布' });
+});
+
+router.get('/overdue/list', authMiddleware, requireRole('editor'), (req, res) => {
+  const overdueReviews = db.prepare(`
+    SELECT r.*, p.title, p.status as paper_status,
+           u.name as reviewer_name, u.email as reviewer_email,
+           julianday('now') - julianday(r.due_date) as days_overdue
+    FROM reviews r
+    JOIN papers p ON r.paper_id = p.id
+    JOIN users u ON r.reviewer_id = u.id
+    WHERE r.status = 'accepted' 
+      AND r.due_date < CURRENT_TIMESTAMP
+    ORDER BY r.due_date ASC
+  `).all();
+
+  res.json({ reviews: overdueReviews });
+});
+
+module.exports = router;
