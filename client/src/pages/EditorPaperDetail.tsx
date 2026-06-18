@@ -332,15 +332,23 @@ export default function EditorPaperDetail() {
                     
                     <div className="flex items-center justify-between text-xs text-gray-500">
                       <span>邀请：{formatDate(review.invitation_date)}</span>
-                      {review.status === 'accepted' && (
-                        <button
-                          onClick={() => handleRemind(review.id)}
-                          className="flex items-center gap-1 text-orange-600 hover:text-orange-700"
-                        >
-                          <Bell size={12} />
-                          催审
-                        </button>
-                      )}
+                      <div className="flex items-center gap-3">
+                        {review.reminder_sent > 0 && (
+                          <span className="text-orange-600 flex items-center gap-1">
+                            <Bell size={12} />
+                            已催审 {review.reminder_sent} 次
+                          </span>
+                        )}
+                        {review.status === 'accepted' && (
+                          <button
+                            onClick={() => handleRemind(review.id)}
+                            className="flex items-center gap-1 text-orange-600 hover:text-orange-700"
+                          >
+                            <Bell size={12} />
+                            催审
+                          </button>
+                        )}
+                      </div>
                     </div>
                     
                     {review.status === 'accepted' && review.due_date && (

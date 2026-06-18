@@ -359,10 +359,8 @@ router.post('/paper/:paperId/assign', authMiddleware, requireRole('editor'), (re
       WHERE id = ?
     `).run(req.user.id, paperId);
 
-    reviewerIds.forEach((reviewerId, index) => {
-      addNotification(reviewerId, 'review_invite', '审稿邀请',
-        `您被邀请为论文"${paper.title}"审稿`, paperId);
-    });
+    addNotification(firstReviewer, 'review_invite', '审稿邀请',
+      `您被邀请为论文"${paper.title}"审稿`, paperId);
   });
 
   res.json({ success: true, message: '审稿人已分配' });

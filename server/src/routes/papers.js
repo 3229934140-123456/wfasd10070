@@ -103,6 +103,26 @@ router.get('/', authMiddleware, (req, res) => {
       SELECT keyword FROM paper_keywords WHERE paper_id = ?
     `).all(paper.id).map(k => k.keyword);
     paper.keywords = keywords;
+
+    let authors = db.prepare(`
+      SELECT * FROM paper_authors WHERE paper_id = ? ORDER BY author_order
+    `).all(paper.id);
+    if (req.user.role === 'reviewer') {
+      authors = authors.map(a => ({
+        id: a.id, paper_id: a.paper_id, author_order: a.author_order,
+        name: '[作者信息已隐藏]', email: null, affiliation: null, is_corresponding: a.is_corresponding,
+      }));
+    }
+    paper.authors = authors;
+
+    const fields = db.prepare(`
+      SELECT f.id, f.name, f.category
+      FROM paper_fields pf
+      JOIN fields f ON pf.field_id = f.id
+      WHERE pf.paper_id = ?
+      ORDER BY f.category, f.name
+    `).all(paper.id);
+    paper.fields = fields;
   });
 
   res.json({
@@ -115,7 +135,25 @@ router.get('/', authMiddleware, (req, res) => {
 });
 
 router.post('/', authMiddleware, requireRole('author'), upload.single('file'), (req, res) => {
-  const { title, abstract, keywords, authors, fields } = req.body;
+  const { title, abstract } = req.body;
+  
+  let keywords = [];
+  let authors = [];
+  let fields = [];
+  
+  try {
+    if (req.body.keywords) {
+      keywords = typeof req.body.keywords === 'string' ? JSON.parse(req.body.keywords) : req.body.keywords;
+    }
+    if (req.body.authors) {
+      authors = typeof req.body.authors === 'string' ? JSON.parse(req.body.authors) : req.body.authors;
+    }
+    if (req.body.fields) {
+      fields = typeof req.body.fields === 'string' ? JSON.parse(req.body.fields) : req.body.fields;
+    }
+  } catch (parseErr) {
+    console.error('解析表单数据失败:', parseErr);
+  }
 
   if (!title || !abstract) {
     return res.status(400).json({ error: '请填写标题和摘要' });
@@ -205,31 +243,77 @@ router.get('/:id', authMiddleware, (req, res) => {
     }
   }
 
-  const authors = db.prepare(`
+  let authors = db.prepare(`
     SELECT * FROM paper_authors WHERE paper_id = ? ORDER BY author_order
   `).all(id);
+  
+  if (req.user.role === 'reviewer') {
+    authors = authors.map(a => ({
+      id: a.id,
+      paper_id: a.paper_id,
+      author_order: a.author_order,
+      name: '[作者信息已隐藏]',
+      email: null,
+      affiliation: null,
+      is_corresponding: a.is_corresponding,
+    }));
+    delete paper.corresponding_author_name;
+    delete paper.corresponding_author_email;
+  }
 
   const keywords = db.prepare(`
     SELECT keyword FROM paper_keywords WHERE paper_id = ?
   `).all(id).map(k => k.keyword);
+
+  const fields = db.prepare(`
+    SELECT f.id, f.name, f.category
+    FROM paper_fields pf
+    JOIN fields f ON pf.field_id = f.id
+    WHERE pf.paper_id = ?
+    ORDER BY f.category, f.name
+  `).all(id);
 
   const versions = db.prepare(`
     SELECT * FROM paper_versions WHERE paper_id = ? ORDER BY version_number DESC
   `).all(id);
 
   let reviews = [];
-  if (req.user.role === 'editor' || req.user.role === 'author') {
+  if (req.user.role === 'editor') {
     reviews = db.prepare(`
-      SELECT r.*, u.name as reviewer_name, u.affiliation as reviewer_affiliation
+      SELECT r.*, u.name as reviewer_name, u.affiliation as reviewer_affiliation, u.email as reviewer_email
       FROM reviews r
       LEFT JOIN users u ON r.reviewer_id = u.id
       WHERE r.paper_id = ?
       ORDER BY r.invitation_date
     `).all(id);
+  } else if (req.user.role === 'author') {
+    reviews = db.prepare(`
+      SELECT r.id, r.paper_id, r.reviewer_id, r.status, r.invitation_date, r.accepted_date,
+             r.completed_date, r.due_date, r.recommendation, r.comments_to_author,
+             r.reminder_sent
+      FROM reviews r
+      WHERE r.paper_id = ? AND r.status = 'completed'
+      ORDER BY r.completed_date
+    `).all(id);
+    
+    reviews = reviews.map(r => ({
+      ...r,
+      reviewer_name: '审稿人',
+      reviewer_affiliation: null,
+    }));
   } else if (req.user.role === 'reviewer') {
     reviews = db.prepare(`
       SELECT * FROM reviews WHERE paper_id = ? AND reviewer_id = ?
     `).all(id, req.user.id);
+  }
+
+  if (req.user.role === 'author' || req.user.role === 'reviewer') {
+    reviews.forEach(review => {
+      const responses = db.prepare(`
+        SELECT * FROM author_responses WHERE review_id = ? ORDER BY submitted_at DESC
+      `).all(review.id);
+      review.responses = responses;
+    });
   }
 
   const decisions = db.prepare(`
@@ -245,6 +329,7 @@ router.get('/:id', authMiddleware, (req, res) => {
       ...paper,
       authors,
       keywords,
+      fields,
       versions,
       reviews,
       decisions
@@ -254,7 +339,21 @@ router.get('/:id', authMiddleware, (req, res) => {
 
 router.put('/:id', authMiddleware, requireRole('author'), upload.single('file'), (req, res) => {
   const { id } = req.params;
-  const { title, abstract, keywords, authors, version_notes } = req.body;
+  const { title, abstract, version_notes } = req.body;
+  
+  let keywords = [];
+  let authors = [];
+  
+  try {
+    if (req.body.keywords) {
+      keywords = typeof req.body.keywords === 'string' ? JSON.parse(req.body.keywords) : req.body.keywords;
+    }
+    if (req.body.authors) {
+      authors = typeof req.body.authors === 'string' ? JSON.parse(req.body.authors) : req.body.authors;
+    }
+  } catch (parseErr) {
+    console.error('解析表单数据失败:', parseErr);
+  }
 
   const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(id);
   if (!paper) {
